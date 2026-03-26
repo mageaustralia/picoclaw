@@ -47,6 +47,11 @@ type ContextBuilder struct {
 	skillFilesAtCache map[string]time.Time
 }
 
+// GetMemoryStore returns the underlying MemoryStore for direct access (e.g. auto-journaling).
+func (cb *ContextBuilder) GetMemoryStore() *MemoryStore {
+	return cb.memory
+}
+
 func (cb *ContextBuilder) WithToolDiscovery(useBM25, useRegex bool) *ContextBuilder {
 	cb.toolDiscoveryBM25 = useBM25
 	cb.toolDiscoveryRegex = useRegex

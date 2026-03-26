@@ -1522,7 +1522,39 @@ func (al *AgentLoop) runAgentLoop(
 			})
 	}
 
+	// Auto-journal: log this interaction to today's daily note
+	if !constants.IsInternalChannel(opts.Channel) && opts.UserMessage != "" {
+		go al.autoJournal(agent, opts.UserMessage, result.finalContent, ts.currentIteration())
+	}
+
 	return result.finalContent, nil
+}
+
+// autoJournal appends a brief entry to today's daily note after each conversation.
+// Runs in a goroutine to avoid blocking the response.
+func (al *AgentLoop) autoJournal(agent *AgentInstance, userMsg, response string, toolIterations int) {
+	if agent == nil || agent.ContextBuilder == nil {
+		return
+	}
+	memory := agent.ContextBuilder.GetMemoryStore()
+	if memory == nil {
+		return
+	}
+
+	userPreview := utils.Truncate(userMsg, 100)
+	responsePreview := utils.Truncate(response, 100)
+
+	now := time.Now().Format("15:04")
+
+	entry := fmt.Sprintf("- **%s** User: %s → Response: %s", now, userPreview, responsePreview)
+	if toolIterations > 1 {
+		entry += fmt.Sprintf(" (%d tool calls)", toolIterations-1)
+	}
+	entry += "\n"
+
+	if err := memory.AppendToday(entry); err != nil {
+		logger.WarnCF("agent", "Failed to auto-journal", map[string]any{"error": err.Error()})
+	}
 }
 
 func (al *AgentLoop) targetReasoningChannelID(channelName string) (chatID string) {
@@ -2311,11 +2343,7 @@ turnLoop:
 			if al.cfg.Agents.Defaults.IsToolFeedbackEnabled() &&
 				ts.channel != "" &&
 				!ts.opts.SuppressToolFeedback {
-				feedbackPreview := utils.Truncate(
-					string(argsJSON),
-					al.cfg.Agents.Defaults.GetToolFeedbackMaxArgsLength(),
-				)
-				feedbackMsg := fmt.Sprintf("\U0001f527 `%s`\n```\n%s\n```", tc.Name, feedbackPreview)
+				feedbackMsg := toolProgressText(tc.Name, toolArgs, iteration)
 				fbCtx, fbCancel := context.WithTimeout(turnCtx, 3*time.Second)
 				_ = al.bus.PublishOutbound(fbCtx, bus.OutboundMessage{
 					Channel: ts.channel,
@@ -3563,6 +3591,110 @@ func filterClientWebSearch(tools []providers.ToolDefinition) []providers.ToolDef
 		result = append(result, t)
 	}
 	return result
+}
+
+// toolProgressText generates a user-friendly progress message for a tool call.
+func toolProgressText(toolName string, args map[string]any, iteration int) string {
+	emoji := "🔧"
+	desc := toolName
+
+	switch toolName {
+	case "read_file":
+		emoji = "📖"
+		if p, ok := args["path"].(string); ok {
+			parts := strings.Split(p, "/")
+			desc = "Reading " + parts[len(parts)-1]
+		} else {
+			desc = "Reading file"
+		}
+	case "write_file":
+		emoji = "✏️"
+		if p, ok := args["path"].(string); ok {
+			parts := strings.Split(p, "/")
+			desc = "Writing " + parts[len(parts)-1]
+		} else {
+			desc = "Writing file"
+		}
+	case "edit_file":
+		emoji = "✏️"
+		desc = "Editing file"
+	case "append_file":
+		emoji = "📝"
+		desc = "Appending to file"
+	case "exec":
+		emoji = "⚡"
+		if cmd, ok := args["command"].(string); ok {
+			desc = friendlyExecDesc(cmd)
+		} else {
+			desc = "Running command"
+		}
+	case "web_search":
+		emoji = "🔍"
+		if q, ok := args["query"].(string); ok {
+			desc = "Searching: " + utils.Truncate(q, 60)
+		} else {
+			desc = "Searching the web"
+		}
+	case "web_fetch":
+		emoji = "🌐"
+		desc = "Fetching webpage"
+	case "list_dir":
+		emoji = "📂"
+		desc = "Listing directory"
+	case "message":
+		emoji = "💬"
+		desc = "Sending message"
+	case "send_file":
+		emoji = "📎"
+		desc = "Sending file"
+	case "spawn":
+		emoji = "🤖"
+		desc = "Starting subagent"
+	case "cron":
+		emoji = "⏰"
+		desc = "Managing schedule"
+	}
+
+	return fmt.Sprintf("%s Step %d: %s", emoji, iteration, desc)
+}
+
+// friendlyExecDesc turns a raw shell command into a user-friendly progress description.
+func friendlyExecDesc(cmd string) string {
+	cmd = strings.TrimSpace(cmd)
+
+	if strings.Contains(cmd, "/skills/") {
+		parts := strings.Split(cmd, "/skills/")
+		if len(parts) > 1 {
+			rest := parts[1]
+			if idx := strings.Index(rest, "/"); idx > 0 {
+				return "Running skill: " + rest[:idx]
+			}
+		}
+	}
+
+	if strings.Contains(cmd, "pip install") || strings.Contains(cmd, "pip3 install") {
+		return "Installing packages"
+	}
+
+	if strings.Contains(cmd, "python") {
+		for _, part := range strings.Fields(cmd) {
+			if strings.HasSuffix(part, ".py") {
+				nameParts := strings.Split(part, "/")
+				return "Running " + nameParts[len(nameParts)-1]
+			}
+		}
+		return "Running Python script"
+	}
+
+	if strings.Contains(cmd, "curl ") || strings.Contains(cmd, "wget ") {
+		return "Downloading..."
+	}
+
+	preview := cmd
+	if len(preview) > 50 {
+		preview = preview[:50] + "..."
+	}
+	return preview
 }
 
 // Helper to extract provider from registry for cleanup
