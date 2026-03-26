@@ -20,6 +20,19 @@ import (
 
 const MaxReadFileSize = 64 * 1024 // 64KB limit to avoid context overflow
 
+// unescapeLiteralNewlines fixes double-escaped newlines from LLMs that send literal \n
+// instead of actual newlines in file content. Only applies when the content has no real
+// newlines but contains literal \n sequences (indicating the LLM double-escaped them).
+func unescapeLiteralNewlines(content string) string {
+	realNewlines := strings.Count(content, "\n")
+	literalNewlines := strings.Count(content, `\n`)
+	if literalNewlines > 5 && realNewlines < 3 {
+		content = strings.ReplaceAll(content, `\n`, "\n")
+		content = strings.ReplaceAll(content, `\t`, "\t")
+	}
+	return content
+}
+
 func validatePathWithAllowPaths(path, workspace string, restrict bool, patterns []*regexp.Regexp) (string, error) {
 	if workspace == "" {
 		return path, fmt.Errorf("workspace is not defined")
@@ -539,6 +552,9 @@ func (t *WriteFileTool) Execute(ctx context.Context, args map[string]any) *ToolR
 			return ErrorResult(fmt.Sprintf("file: %s already exists. Set overwrite=true to replace.", path))
 		}
 	}
+
+	// Fix double-escaped newlines from LLMs that send literal \n instead of actual newlines
+	content = unescapeLiteralNewlines(content)
 
 	if err := t.fs.WriteFile(path, []byte(content)); err != nil {
 		return ErrorResult(err.Error())
