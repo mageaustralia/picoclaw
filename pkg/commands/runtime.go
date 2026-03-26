@@ -15,6 +15,7 @@ type Runtime struct {
 	GetActiveTurn      func() any // Returning any to avoid circular dependency with agent package
 	SwitchModel        func(value string) (oldModel string, err error)
 	SwitchChannel      func(value string) error
+	SwitchAgent        func(agentID string) (oldAgent string, err error)
 	ClearHistory       func() error
 	ReloadConfig       func() error
 }

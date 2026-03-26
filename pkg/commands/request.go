@@ -75,6 +75,13 @@ func nthToken(input string, n int) string {
 	return parts[n]
 }
 
+func joinOrNone(items []string) string {
+	if len(items) == 0 {
+		return "(none)"
+	}
+	return strings.Join(items, ", ")
+}
+
 func normalizeCommandName(name string) string {
 	return strings.ToLower(strings.TrimSpace(name))
 }

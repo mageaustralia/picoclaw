@@ -57,6 +57,7 @@ type AgentLoop struct {
 	hookRuntime    hookRuntime
 	steering       *steeringQueue
 	pendingSkills  sync.Map
+	agentOverrides sync.Map // key: "channel:chatID" → value: agentID (string)
 	mu             sync.RWMutex
 
 	// Concurrent turn management (from HEAD)
@@ -1355,6 +1356,20 @@ func (al *AgentLoop) resolveMessageRoute(msg bus.InboundMessage) (routing.Resolv
 		GuildID:    inboundMetadata(msg, metadataKeyGuildID),
 		TeamID:     inboundMetadata(msg, metadataKeyTeamID),
 	})
+
+	// Check for per-chat agent override (set via /switch agent to <id>)
+	overrideKey := msg.Channel + ":" + msg.ChatID
+	if overrideID, ok := al.agentOverrides.Load(overrideKey); ok {
+		if agentID, ok := overrideID.(string); ok {
+			if overrideAgent, ok := registry.GetAgent(agentID); ok {
+				route.AgentID = agentID
+				route.MatchedBy = "override"
+				route.SessionKey = strings.ToLower(fmt.Sprintf("agent:%s:%s:direct:%s",
+					routing.NormalizeAgentID(agentID), msg.Channel, msg.ChatID))
+				return route, overrideAgent, nil
+			}
+		}
+	}
 
 	agent, ok := registry.GetAgent(route.AgentID)
 	if !ok {
@@ -3445,6 +3460,21 @@ func (al *AgentLoop) buildCommandsRuntime(agent *AgentInstance, opts *processOpt
 				}
 			}
 			return oldModel, nil
+		}
+
+		rt.SwitchAgent = func(agentID string) (string, error) {
+			agentID = strings.TrimSpace(agentID)
+			targetAgent, ok := registry.GetAgent(agentID)
+			if !ok {
+				return "", fmt.Errorf("agent %q not found. Available: %s", agentID, strings.Join(registry.ListAgentIDs(), ", "))
+			}
+			overrideKey := opts.Channel + ":" + opts.ChatID
+			oldAgent := agent.ID
+			if prevID, ok := al.agentOverrides.Load(overrideKey); ok {
+				oldAgent = prevID.(string)
+			}
+			al.agentOverrides.Store(overrideKey, routing.NormalizeAgentID(targetAgent.ID))
+			return oldAgent, nil
 		}
 
 		rt.ClearHistory = func() error {
