@@ -269,6 +269,9 @@ func setupAndStartServices(
 	}
 	fmt.Println("✓ Cron service started")
 
+	// Register built-in memory consolidation cron jobs
+	setupMemoryConsolidation(runningServices.CronService, cfg)
+
 	runningServices.HeartbeatService = heartbeat.NewHeartbeatService(
 		cfg.WorkspacePath(),
 		cfg.Heartbeat.Interval,
@@ -466,6 +469,7 @@ func restartServices(
 	if err = runningServices.CronService.Start(); err != nil {
 		return fmt.Errorf("error restarting cron service: %w", err)
 	}
+	setupMemoryConsolidation(runningServices.CronService, cfg)
 	fmt.Println("  ✓ Cron service restarted")
 
 	runningServices.HeartbeatService = heartbeat.NewHeartbeatService(
@@ -651,6 +655,71 @@ func setupCronTool(
 	}
 
 	return cronService, nil
+}
+
+// setupMemoryConsolidation registers built-in cron jobs for memory management:
+// - Hourly: summarize raw auto-journal entries into compact summaries
+// - Daily (11 PM): write end-of-day summary and update long-term MEMORY.md
+func setupMemoryConsolidation(cronService *cron.CronService, cfg *config.Config) {
+	chatID := ""
+	if len(cfg.Channels.Telegram.AllowFrom) > 0 {
+		chatID = cfg.Channels.Telegram.AllowFrom[0]
+	}
+	if chatID == "" {
+		return // No chat ID configured, skip memory consolidation
+	}
+
+	existingJobs := cronService.ListJobs(true)
+	hasHourly := false
+	hasDaily := false
+	for _, job := range existingJobs {
+		if job.Name == "memory-hourly" {
+			hasHourly = true
+		}
+		if job.Name == "memory-daily" {
+			hasDaily = true
+		}
+	}
+
+	if !hasHourly {
+		everyMS := int64(1 * 60 * 60 * 1000) // 1 hour
+		_, err := cronService.AddJob(
+			"memory-hourly",
+			cron.CronSchedule{Kind: "every", EveryMS: &everyMS},
+			`Consolidate today's daily notes. Instructions:
+1. Read today's daily notes file
+2. If there are raw auto-journal entries (lines starting with "- **HH:MM**"), summarize them into a brief paragraph under a "## HH:00 Summary" heading
+3. Replace the raw entries you summarized with your summary using write_file
+4. If there are no raw entries to summarize, do nothing — do NOT send a message
+5. Only send a message via the message tool if you actually wrote a summary`,
+			false,
+			"telegram",
+			chatID,
+		)
+		if err != nil {
+			fmt.Printf("⚠ Failed to setup hourly memory consolidation: %v\n", err)
+		}
+	}
+
+	if !hasDaily {
+		_, err := cronService.AddJob(
+			"memory-daily",
+			cron.CronSchedule{Kind: "cron", Expr: "0 23 * * *"},
+			`End-of-day memory consolidation. Instructions:
+1. Read today's daily notes file
+2. Read MEMORY.md
+3. Write a brief "## Summary" at the top of today's daily note summarizing the day's key events
+4. Update MEMORY.md if there are important new facts, preferences, or corrections worth remembering long-term
+5. Keep MEMORY.md organized and concise — update/replace outdated info, don't append endlessly
+6. Use the message tool to confirm what you updated (or "No long-term updates needed")`,
+			false,
+			"telegram",
+			chatID,
+		)
+		if err != nil {
+			fmt.Printf("⚠ Failed to setup daily memory consolidation: %v\n", err)
+		}
+	}
 }
 
 func createHeartbeatHandler(agentLoop *agent.AgentLoop) func(prompt, channel, chatID string) *tools.ToolResult {
