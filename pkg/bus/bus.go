@@ -3,6 +3,7 @@ package bus
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 
@@ -80,7 +81,22 @@ func publish[T any](ctx context.Context, mb *MessageBus, ch chan T, msg T) error
 }
 
 func (mb *MessageBus) PublishInbound(ctx context.Context, msg InboundMessage) error {
+	// If queue already has messages, the consumer is busy — notify user their message is queued
+	depth := len(mb.inbound)
+	if depth > 0 && msg.Channel != "" && msg.ChatID != "" {
+		position := depth + 1
+		_ = publish(ctx, mb, mb.outbound, OutboundMessage{
+			Channel: msg.Channel,
+			ChatID:  msg.ChatID,
+			Content: fmt.Sprintf("📬 Message queued (position %d) — still working on a previous request.", position),
+		})
+	}
 	return publish(ctx, mb, mb.inbound, msg)
+}
+
+// InboundQueueDepth returns the current number of messages waiting in the inbound queue.
+func (mb *MessageBus) InboundQueueDepth() int {
+	return len(mb.inbound)
 }
 
 func (mb *MessageBus) InboundChan() <-chan InboundMessage {
